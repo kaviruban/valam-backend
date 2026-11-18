@@ -2,15 +2,19 @@ package com.valam.ecommerce.product.service;
 
 import com.valam.ecommerce.common.dto.PageResponse;
 import com.valam.ecommerce.common.exception.BusinessValidationException;
+import com.valam.ecommerce.common.exception.ConflictException;
 import com.valam.ecommerce.common.exception.ResourceNotFoundException;
+import com.valam.ecommerce.common.util.Slugs;
 import com.valam.ecommerce.product.dto.ProductRequest;
 import com.valam.ecommerce.product.dto.ProductResponse;
 import com.valam.ecommerce.product.dto.VariantRequest;
 import com.valam.ecommerce.product.mapper.ProductMapper;
 import com.valam.ecommerce.product.model.Category;
 import com.valam.ecommerce.product.model.Product;
+import com.valam.ecommerce.product.model.ProductImage;
 import com.valam.ecommerce.product.model.ProductVariant;
 import com.valam.ecommerce.product.repository.ProductRepository;
+import com.valam.ecommerce.product.repository.ProductVariantRepository;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
@@ -21,46 +25,55 @@ import org.springframework.util.StringUtils;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
 import static com.valam.ecommerce.product.repository.ProductSpecifications.hasCategory;
+import static com.valam.ecommerce.product.repository.ProductSpecifications.inStock;
 import static com.valam.ecommerce.product.repository.ProductSpecifications.isActive;
-import static com.valam.ecommerce.product.repository.ProductSpecifications.nameContains;
+import static com.valam.ecommerce.product.repository.ProductSpecifications.isFeatured;
+import static com.valam.ecommerce.product.repository.ProductSpecifications.nameOrSkuContains;
 
 @Service
 @Transactional(readOnly = true)
 public class ProductService {
 
     private static final String RESOURCE = "Product";
+    private static final String DEFAULT_COUNTRY = "India";
     private static final Set<String> SORTABLE_FIELDS = Set.of("name", "category.name", "createdAt", "updatedAt");
 
     private final ProductRepository productRepository;
+    private final ProductVariantRepository variantRepository;
     private final CategoryService categoryService;
     private final ProductMapper productMapper;
 
-    public ProductService(ProductRepository productRepository, CategoryService categoryService,
-                          ProductMapper productMapper) {
+    public ProductService(ProductRepository productRepository, ProductVariantRepository variantRepository,
+                          CategoryService categoryService, ProductMapper productMapper) {
         this.productRepository = productRepository;
+        this.variantRepository = variantRepository;
         this.categoryService = categoryService;
         this.productMapper = productMapper;
     }
 
     // ---------- Queries ----------
 
-    /** Paged search; every filter is optional. */
-    public PageResponse<ProductResponse> search(Long categoryId, Boolean active, String q, Pageable pageable) {
+    /** Paged admin search; every filter is optional. {@code q} matches the product name or a variant SKU. */
+    public PageResponse<ProductResponse> search(ProductFilter filter, Pageable pageable) {
         validateSort(pageable.getSort());
 
-        List<Specification<Product>> filters = new ArrayList<>();
-        if (categoryId != null) filters.add(hasCategory(categoryId));
-        if (active != null) filters.add(isActive(active));
-        if (StringUtils.hasText(q)) filters.add(nameContains(q.trim()));
+        List<Specification<Product>> specs = new ArrayList<>();
+        if (filter.categoryId() != null) specs.add(hasCategory(filter.categoryId()));
+        if (filter.active() != null) specs.add(isActive(filter.active()));
+        if (filter.featured() != null) specs.add(isFeatured(filter.featured()));
+        if (filter.inStock() != null) specs.add(inStock(filter.inStock()));
+        if (StringUtils.hasText(filter.q())) specs.add(nameOrSkuContains(filter.q().trim()));
 
         return PageResponse.from(
-                productRepository.findAll(Specification.allOf(filters), pageable).map(productMapper::toResponse));
+                productRepository.findAll(Specification.allOf(specs), pageable).map(productMapper::toResponse));
     }
 
     public ProductResponse getById(Long id) {
@@ -71,25 +84,45 @@ public class ProductService {
 
     @Transactional
     public ProductResponse create(ProductRequest request) {
-        Product product = new Product();
-        applyDetails(product, request);
-
         for (VariantRequest vr : request.variants()) {
             if (vr.id() != null) {
                 throw new BusinessValidationException("Variant id must not be set when creating a product.");
             }
         }
-        reconcileVariants(product, request);
+        Product product = new Product();
+        // All lookups run before the entity is touched, so no half-applied state is flushed by a query.
+        Category category = categoryService.findAssignable(request.categoryId(), null);
+        String slug = resolveSlug(request, null);
+        List<VariantValues> variants = prepareVariants(request, category, product);
+
+        product.setCategory(category);
+        product.setSlug(slug);
+        applyDetails(product, request);
+        applyVariants(product, variants);
 
         return productMapper.toResponse(productRepository.save(product));
     }
 
-    /** Full replacement: variants missing from the request are removed, ones with an id are updated. */
+    /**
+     * Full replacement: optional fields left out are cleared, variants missing from the request are removed and
+     * ones with an id are updated.
+     */
     @Transactional
     public ProductResponse update(Long id, ProductRequest request) {
         Product product = findProduct(id);
+        if (request.version() != null && !request.version().equals(product.getVersion())) {
+            throw staleEdit();
+        }
+        Category category = categoryService.findAssignable(request.categoryId(), product.getCategory());
+        String slug = resolveSlug(request, product);
+        List<VariantValues> variants = prepareVariants(request, category, product);
+
+        product.setCategory(category);
+        product.setSlug(slug);
         applyDetails(product, request);
-        reconcileVariants(product, request);
+        applyVariants(product, variants);
+        product.touch();
+
         return productMapper.toResponse(productRepository.saveAndFlush(product));
     }
 
@@ -113,23 +146,71 @@ public class ProductService {
                 .orElseThrow(() -> new ResourceNotFoundException(RESOURCE, id));
     }
 
-    private void applyDetails(Product product, ProductRequest request) {
-        product.setName(request.name().trim());
-        product.setDescription(request.description());
-        product.setCategory(categoryService.findAssignable(request.categoryId(), product.getCategory()));
-        product.setImageUrl(StringUtils.hasText(request.imageUrl()) ? request.imageUrl().trim() : null);
-        product.setActive(request.active() == null || request.active());
+    private static ConflictException staleEdit() {
+        return new ConflictException("This product was changed by someone else. Reload it and try again.");
     }
 
-    /** Makes the product's variants match the request: update by id, add new, drop the rest. */
-    private static void reconcileVariants(Product product, ProductRequest request) {
-        Category category = product.getCategory();
+    /** An explicit slug must be free; otherwise keep the current one, or generate one from the name. */
+    private String resolveSlug(ProductRequest request, Product existing) {
+        if (request.slug() != null) {
+            boolean taken = existing == null
+                    ? productRepository.existsBySlug(request.slug())
+                    : productRepository.existsBySlugAndIdNot(request.slug(), existing.getId());
+            if (taken) {
+                throw new BusinessValidationException("The URL slug '" + request.slug() + "' is already used.");
+            }
+            return request.slug();
+        }
+        if (existing != null) {
+            return existing.getSlug(); // keep storefront links stable when the name changes
+        }
+        String base = Slugs.slugify(request.name());
+        if (base.isEmpty()) {
+            base = "product";
+        }
+        String candidate = base;
+        for (int n = 2; productRepository.existsBySlug(candidate); n++) {
+            candidate = base + "-" + n;
+        }
+        return candidate;
+    }
+
+    private static void applyDetails(Product product, ProductRequest request) {
+        product.setName(request.name().trim());
+        product.setShortDescription(trimToNull(request.shortDescription()));
+        product.setDescription(trimToNull(request.description()));
+        product.replaceImages(request.images() == null ? List.of() : request.images().stream()
+                .map(i -> new ProductImage(i.url().trim(), trimToNull(i.altText())))
+                .toList());
+        product.replaceHighlights(request.highlights() == null ? List.of() : request.highlights().stream()
+                .map(String::trim)
+                .toList());
+        product.setIngredients(trimToNull(request.ingredients()));
+        product.setUsageInstructions(trimToNull(request.usageInstructions()));
+        product.setStorageInstructions(trimToNull(request.storageInstructions()));
+        product.setShelfLife(trimToNull(request.shelfLife()));
+        product.setCountryOfOrigin(Objects.requireNonNullElse(trimToNull(request.countryOfOrigin()), DEFAULT_COUNTRY));
+        product.setHsnCode(request.hsnCode());
+        product.setGstRate(request.gstRate());
+        product.setMetaTitle(trimToNull(request.metaTitle()));
+        product.setMetaDescription(trimToNull(request.metaDescription()));
+        product.setActive(request.active() == null || request.active());
+        product.setFeatured(Boolean.TRUE.equals(request.featured()));
+    }
+
+    /** A validated variant row, ready to apply. {@code target} is null for a new variant. */
+    private record VariantValues(ProductVariant target, VariantRequest request, int baseQuantity, String sku) {
+    }
+
+    /** Validates every variant (units, pack sizes, SKUs, MRP) without changing anything. */
+    private List<VariantValues> prepareVariants(ProductRequest request, Category category, Product product) {
         Map<Long, ProductVariant> existing = product.getVariants().stream()
                 .collect(Collectors.toMap(ProductVariant::getId, Function.identity()));
 
         Set<Integer> seenQuantities = new HashSet<>();
-        Set<Long> keptIds = new HashSet<>();
-        List<ProductVariant> toAdd = new ArrayList<>();
+        Set<Long> seenIds = new HashSet<>();
+        Set<String> seenSkus = new HashSet<>();
+        List<VariantValues> result = new ArrayList<>();
 
         for (VariantRequest vr : request.variants()) {
             int baseQuantity = toBaseQuantity(vr, category);
@@ -138,27 +219,61 @@ public class ProductService {
                         "Duplicate pack size: " + vr.quantity().toPlainString() + " " + vr.unit().getSymbol());
             }
 
-            ProductVariant variant;
-            if (vr.id() == null) {
-                variant = new ProductVariant();
-                toAdd.add(variant);
-            } else {
-                variant = existing.get(vr.id());
-                if (variant == null) {
+            ProductVariant target = null;
+            if (vr.id() != null) {
+                target = existing.get(vr.id());
+                if (target == null) {
                     throw new BusinessValidationException(
                             "Variant " + vr.id() + " does not belong to product " + product.getId());
                 }
-                if (!keptIds.add(vr.id())) {
+                if (!seenIds.add(vr.id())) {
                     throw new BusinessValidationException("Variant " + vr.id() + " is listed more than once.");
                 }
             }
-            variant.setQuantity(baseQuantity);
-            variant.setPrice(vr.price());
-            variant.setStockQuantity(vr.stockQuantity());
-        }
 
-        existing.values().stream()
-                .filter(v -> !keptIds.contains(v.getId()))
+            if (vr.mrp() != null && vr.mrp().compareTo(vr.price()) < 0) {
+                throw new BusinessValidationException(
+                        "MRP " + vr.mrp().toPlainString() + " is below the selling price " + vr.price().toPlainString()
+                                + " for pack size " + vr.quantity().toPlainString() + " " + vr.unit().getSymbol() + ".");
+            }
+
+            String sku = StringUtils.hasText(vr.sku()) ? vr.sku().trim().toUpperCase(Locale.ROOT) : null;
+            if (sku != null) {
+                if (!seenSkus.add(sku)) {
+                    throw new BusinessValidationException("SKU " + sku + " is used for more than one pack size.");
+                }
+                Long ownerId = target == null ? null : target.getId();
+                variantRepository.findBySkuIgnoreCase(sku)
+                        .filter(other -> !other.getId().equals(ownerId))
+                        .ifPresent(other -> {
+                            throw new BusinessValidationException("SKU " + sku + " is already used by another pack size.");
+                        });
+            }
+            result.add(new VariantValues(target, vr, baseQuantity, sku));
+        }
+        return result;
+    }
+
+    /** Makes the product's variants match the prepared list: update by id, add new, drop the rest. */
+    private static void applyVariants(Product product, List<VariantValues> values) {
+        Set<ProductVariant> kept = new HashSet<>();
+        List<ProductVariant> toAdd = new ArrayList<>();
+        for (VariantValues v : values) {
+            ProductVariant variant = v.target();
+            if (variant == null) {
+                variant = new ProductVariant();
+                toAdd.add(variant);
+            } else {
+                kept.add(variant);
+            }
+            variant.setSku(v.sku());
+            variant.setQuantity(v.baseQuantity());
+            variant.setPrice(v.request().price());
+            variant.setMrp(v.request().mrp());
+            variant.setStockQuantity(v.request().stockQuantity());
+        }
+        product.getVariants().stream()
+                .filter(v -> !kept.contains(v))
                 .toList()
                 .forEach(product::removeVariant);
         toAdd.forEach(product::addVariant);
@@ -169,7 +284,7 @@ public class ProductService {
         if (vr.unit().getMeasureType() != category.getMeasureType()) {
             throw new BusinessValidationException(
                     "Unit " + vr.unit() + " is not allowed for category '" + category.getName()
-                            + "' (measured by " + category.getMeasureType().name().toLowerCase() + ").");
+                            + "' (measured by " + category.getMeasureType().name().toLowerCase(Locale.ROOT) + ").");
         }
         try {
             return vr.unit().toBase(vr.quantity());
@@ -179,6 +294,10 @@ public class ProductService {
                             + " must be a whole number of " + category.getMeasureType().getBaseUnit().getSymbol()
                             + " and within range.");
         }
+    }
+
+    private static String trimToNull(String value) {
+        return StringUtils.hasText(value) ? value.trim() : null;
     }
 
     private static void validateSort(Sort sort) {

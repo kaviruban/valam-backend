@@ -1,6 +1,9 @@
 package com.valam.ecommerce.product.repository;
 
 import com.valam.ecommerce.product.model.Product;
+import com.valam.ecommerce.product.model.ProductVariant;
+import jakarta.persistence.criteria.Root;
+import jakarta.persistence.criteria.Subquery;
 import org.springframework.data.jpa.domain.Specification;
 
 import java.util.Locale;
@@ -19,12 +22,38 @@ public final class ProductSpecifications {
         return (root, query, cb) -> cb.equal(root.get("active"), active);
     }
 
-    /** Case-insensitive "contains" match on name; LIKE wildcards in the input are matched literally. */
-    public static Specification<Product> nameContains(String text) {
-        String escaped = text.toLowerCase(Locale.ROOT)
+    public static Specification<Product> isFeatured(boolean featured) {
+        return (root, query, cb) -> cb.equal(root.get("featured"), featured);
+    }
+
+    /** In stock = at least one variant with stock left. */
+    public static Specification<Product> inStock(boolean inStock) {
+        return (root, query, cb) -> {
+            Subquery<Long> sub = query.subquery(Long.class);
+            Root<ProductVariant> v = sub.from(ProductVariant.class);
+            sub.select(v.get("id")).where(
+                    cb.equal(v.get("product"), root),
+                    cb.greaterThan(v.get("stockQuantity"), 0));
+            return inStock ? cb.exists(sub) : cb.not(cb.exists(sub));
+        };
+    }
+
+    /**
+     * Case-insensitive "contains" match on the product name or any variant SKU.
+     * LIKE wildcards in the input are matched literally.
+     */
+    public static Specification<Product> nameOrSkuContains(String text) {
+        String pattern = "%" + text.toLowerCase(Locale.ROOT)
                 .replace("\\", "\\\\")
                 .replace("%", "\\%")
-                .replace("_", "\\_");
-        return (root, query, cb) -> cb.like(cb.lower(root.get("name")), "%" + escaped + "%", '\\');
+                .replace("_", "\\_") + "%";
+        return (root, query, cb) -> {
+            Subquery<Long> sub = query.subquery(Long.class);
+            Root<ProductVariant> v = sub.from(ProductVariant.class);
+            sub.select(v.get("id")).where(
+                    cb.equal(v.get("product"), root),
+                    cb.like(cb.lower(v.get("sku")), pattern, '\\'));
+            return cb.or(cb.like(cb.lower(root.get("name")), pattern, '\\'), cb.exists(sub));
+        };
     }
 }

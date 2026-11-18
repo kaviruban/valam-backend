@@ -3,6 +3,7 @@ package com.valam.ecommerce.common.exception;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -31,6 +32,18 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(BusinessValidationException.class)
     public ProblemDetail handleBusinessValidation(BusinessValidationException ex) {
         return problem(HttpStatus.BAD_REQUEST, "Invalid request", ex.getMessage());
+    }
+
+    @ExceptionHandler(ConflictException.class)
+    public ProblemDetail handleConflict(ConflictException ex) {
+        return problem(HttpStatus.CONFLICT, "Conflict", ex.getMessage());
+    }
+
+    /** Two saves raced on the same row; the later one loses instead of silently overwriting. */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ProblemDetail handleOptimisticLock(OptimisticLockingFailureException ex) {
+        return problem(HttpStatus.CONFLICT, "Conflict",
+                "This record was changed by someone else. Reload it and try again.");
     }
 
     @ExceptionHandler(DataIntegrityViolationException.class)

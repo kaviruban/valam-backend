@@ -9,9 +9,13 @@ import java.util.Optional;
 
 public interface ProductRepository extends JpaRepository<Product, Long>, JpaSpecificationExecutor<Product> {
 
-    /** Loads a product together with its category and variants in a single query. */
+    /** Loads a product together with its category and variants; images and highlights load in batches. */
     @EntityGraph(attributePaths = {"category", "variants"})
     Optional<Product> findWithVariantsById(Long id);
 
     boolean existsByCategoryId(Long categoryId);
+
+    boolean existsBySlug(String slug);
+
+    boolean existsBySlugAndIdNot(String slug, Long id);
 }

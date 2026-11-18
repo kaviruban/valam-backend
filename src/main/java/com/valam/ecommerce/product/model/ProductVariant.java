@@ -21,11 +21,20 @@ public class ProductVariant {
     @JoinColumn(name = "product_id", nullable = false)
     private Product product;
 
+    /** Stock keeping unit, stored upper-case; unique across all variants when set. */
+    @Column(length = 64)
+    private String sku;
+
     @Column(nullable = false)
     private Integer quantity;
 
+    /** Selling price, GST-inclusive. */
     @Column(nullable = false, precision = 12, scale = 2)
     private BigDecimal price;
+
+    /** Maximum retail price printed on the pack; when above {@code price} the storefront shows a discount. */
+    @Column(precision = 12, scale = 2)
+    private BigDecimal mrp;
 
     @Column(name = "stock_quantity", nullable = false)
     private Integer stockQuantity;
@@ -46,6 +55,22 @@ public class ProductVariant {
 
     void setProduct(Product product) {
         this.product = product;
+    }
+
+    public String getSku() {
+        return sku;
+    }
+
+    public void setSku(String sku) {
+        this.sku = sku;
+    }
+
+    public BigDecimal getMrp() {
+        return mrp;
+    }
+
+    public void setMrp(BigDecimal mrp) {
+        this.mrp = mrp;
     }
 
     public Integer getQuantity() {
