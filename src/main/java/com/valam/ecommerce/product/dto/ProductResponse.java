@@ -7,6 +7,7 @@ import java.time.LocalDateTime;
 import java.util.List;
 
 /**
+ * @param productCode  human-friendly product ID such as "PRD-000001", generated on create and never changed
  * @param measureType  the category's measure type, so the edit form can offer the right units
  * @param thumbnailUrl the main (first) image, or null when the product has no images
  * @param minPrice     lowest variant price, for "from ₹80" displays
@@ -16,6 +17,7 @@ import java.util.List;
  */
 public record ProductResponse(
         Long id,
+        String productCode,
         String name,
         String slug,
         String shortDescription,

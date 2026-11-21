@@ -14,7 +14,6 @@ import com.valam.ecommerce.product.model.Product;
 import com.valam.ecommerce.product.model.ProductImage;
 import com.valam.ecommerce.product.model.ProductVariant;
 import com.valam.ecommerce.product.repository.ProductRepository;
-import com.valam.ecommerce.product.repository.ProductVariantRepository;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
@@ -36,7 +35,7 @@ import static com.valam.ecommerce.product.repository.ProductSpecifications.hasCa
 import static com.valam.ecommerce.product.repository.ProductSpecifications.inStock;
 import static com.valam.ecommerce.product.repository.ProductSpecifications.isActive;
 import static com.valam.ecommerce.product.repository.ProductSpecifications.isFeatured;
-import static com.valam.ecommerce.product.repository.ProductSpecifications.nameOrSkuContains;
+import static com.valam.ecommerce.product.repository.ProductSpecifications.matchesText;
 
 @Service
 @Transactional(readOnly = true)
@@ -47,21 +46,19 @@ public class ProductService {
     private static final Set<String> SORTABLE_FIELDS = Set.of("name", "category.name", "createdAt", "updatedAt");
 
     private final ProductRepository productRepository;
-    private final ProductVariantRepository variantRepository;
     private final CategoryService categoryService;
     private final ProductMapper productMapper;
 
-    public ProductService(ProductRepository productRepository, ProductVariantRepository variantRepository,
-                          CategoryService categoryService, ProductMapper productMapper) {
+    public ProductService(ProductRepository productRepository, CategoryService categoryService,
+                          ProductMapper productMapper) {
         this.productRepository = productRepository;
-        this.variantRepository = variantRepository;
         this.categoryService = categoryService;
         this.productMapper = productMapper;
     }
 
     // ---------- Queries ----------
 
-    /** Paged admin search; every filter is optional. {@code q} matches the product name or a variant SKU. */
+    /** Paged admin search; every filter is optional. {@code q} matches the product name, product code or a variant ISBN. */
     public PageResponse<ProductResponse> search(ProductFilter filter, Pageable pageable) {
         validateSort(pageable.getSort());
 
@@ -70,7 +67,7 @@ public class ProductService {
         if (filter.active() != null) specs.add(isActive(filter.active()));
         if (filter.featured() != null) specs.add(isFeatured(filter.featured()));
         if (filter.inStock() != null) specs.add(inStock(filter.inStock()));
-        if (StringUtils.hasText(filter.q())) specs.add(nameOrSkuContains(filter.q().trim()));
+        if (StringUtils.hasText(filter.q())) specs.add(matchesText(filter.q().trim()));
 
         return PageResponse.from(
                 productRepository.findAll(Specification.allOf(specs), pageable).map(productMapper::toResponse));
@@ -199,17 +196,16 @@ public class ProductService {
     }
 
     /** A validated variant row, ready to apply. {@code target} is null for a new variant. */
-    private record VariantValues(ProductVariant target, VariantRequest request, int baseQuantity, String sku) {
+    private record VariantValues(ProductVariant target, VariantRequest request, int baseQuantity) {
     }
 
-    /** Validates every variant (units, pack sizes, SKUs, MRP) without changing anything. */
+    /** Validates every variant (units, pack sizes, MRP) without changing anything. */
     private List<VariantValues> prepareVariants(ProductRequest request, Category category, Product product) {
         Map<Long, ProductVariant> existing = product.getVariants().stream()
                 .collect(Collectors.toMap(ProductVariant::getId, Function.identity()));
 
         Set<Integer> seenQuantities = new HashSet<>();
         Set<Long> seenIds = new HashSet<>();
-        Set<String> seenSkus = new HashSet<>();
         List<VariantValues> result = new ArrayList<>();
 
         for (VariantRequest vr : request.variants()) {
@@ -237,19 +233,7 @@ public class ProductService {
                                 + " for pack size " + vr.quantity().toPlainString() + " " + vr.unit().getSymbol() + ".");
             }
 
-            String sku = StringUtils.hasText(vr.sku()) ? vr.sku().trim().toUpperCase(Locale.ROOT) : null;
-            if (sku != null) {
-                if (!seenSkus.add(sku)) {
-                    throw new BusinessValidationException("SKU " + sku + " is used for more than one pack size.");
-                }
-                Long ownerId = target == null ? null : target.getId();
-                variantRepository.findBySkuIgnoreCase(sku)
-                        .filter(other -> !other.getId().equals(ownerId))
-                        .ifPresent(other -> {
-                            throw new BusinessValidationException("SKU " + sku + " is already used by another pack size.");
-                        });
-            }
-            result.add(new VariantValues(target, vr, baseQuantity, sku));
+            result.add(new VariantValues(target, vr, baseQuantity));
         }
         return result;
     }
@@ -266,7 +250,6 @@ public class ProductService {
             } else {
                 kept.add(variant);
             }
-            variant.setSku(v.sku());
             variant.setQuantity(v.baseQuantity());
             variant.setPrice(v.request().price());
             variant.setMrp(v.request().mrp());

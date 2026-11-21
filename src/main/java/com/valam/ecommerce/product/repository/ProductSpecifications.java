@@ -39,10 +39,10 @@ public final class ProductSpecifications {
     }
 
     /**
-     * Case-insensitive "contains" match on the product name or any variant SKU.
+     * Case-insensitive "contains" match on the product name, product code or any variant ISBN.
      * LIKE wildcards in the input are matched literally.
      */
-    public static Specification<Product> nameOrSkuContains(String text) {
+    public static Specification<Product> matchesText(String text) {
         String pattern = "%" + text.toLowerCase(Locale.ROOT)
                 .replace("\\", "\\\\")
                 .replace("%", "\\%")
@@ -52,8 +52,11 @@ public final class ProductSpecifications {
             Root<ProductVariant> v = sub.from(ProductVariant.class);
             sub.select(v.get("id")).where(
                     cb.equal(v.get("product"), root),
-                    cb.like(cb.lower(v.get("sku")), pattern, '\\'));
-            return cb.or(cb.like(cb.lower(root.get("name")), pattern, '\\'), cb.exists(sub));
+                    cb.like(v.get("isbn"), pattern, '\\'));
+            return cb.or(
+                    cb.like(cb.lower(root.get("name")), pattern, '\\'),
+                    cb.like(cb.lower(root.get("productCode")), pattern, '\\'),
+                    cb.exists(sub));
         };
     }
 }

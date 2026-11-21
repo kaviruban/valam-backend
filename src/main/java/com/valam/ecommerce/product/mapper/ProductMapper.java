@@ -39,6 +39,7 @@ public class ProductMapper {
 
         return new ProductResponse(
                 product.getId(),
+                product.getProductCode(),
                 product.getName(),
                 product.getSlug(),
                 product.getShortDescription(),
@@ -73,7 +74,7 @@ public class ProductMapper {
     public VariantResponse toResponse(ProductVariant variant, MeasureType measureType) {
         return new VariantResponse(
                 variant.getId(),
-                variant.getSku(),
+                variant.getIsbn(),
                 variant.getQuantity(),
                 measureType.getBaseUnit(),
                 QuantityUnit.label(variant.getQuantity(), measureType),

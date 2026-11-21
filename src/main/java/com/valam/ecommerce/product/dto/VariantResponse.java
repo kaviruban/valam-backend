@@ -5,6 +5,7 @@ import com.valam.ecommerce.product.model.QuantityUnit;
 import java.math.BigDecimal;
 
 /**
+ * @param isbn            13-digit barcode number, generated on create and never changed
  * @param quantity        quantity in {@code unit}, which is always the base unit (G or ML)
  * @param label           display text such as "500 g" or "1.5 kg"
  * @param mrp             maximum retail price, or null when not set
@@ -12,7 +13,7 @@ import java.math.BigDecimal;
  */
 public record VariantResponse(
         Long id,
-        String sku,
+        String isbn,
         Integer quantity,
         QuantityUnit unit,
         String label,
